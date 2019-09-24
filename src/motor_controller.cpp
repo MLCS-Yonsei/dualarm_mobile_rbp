@@ -7,6 +7,8 @@
 #include "geometry_msgs/Twist.h"
 #include "nav_msgs/Odometry.h"
 #include <sstream>
+#include "std_msgs/Int64.h"
+#include "std_msgs/Float64.h"
 
 typedef void* HANDLE;
 typedef int BOOL;
@@ -46,7 +48,7 @@ double radps_to_rpm = 60.0 / 2.0 / PI;
 double rpm_to_radps = 2.0 * PI / 60;
 
 // Saturate velocity with l1 norm ball
-double norm_limit = 0.4;
+double norm_limit = 0.74;
 
 double linear_x_d = 0;
 double linear_y_d = 0;
@@ -240,25 +242,26 @@ void commandCallback(const geometry_msgs::Twist::ConstPtr& cmd_vel)
 
     double norm_desired = abs(linear_x_d) + abs(linear_y_d) + abs(l * angular_z_d);
 
-    if (norm_desired > 0.02)
-	{
-		if (norm_desired > norm_limit)
-		{
-		    u_p = norm_limit / norm_desired * angular_z_d;
-		    u_x = norm_limit / norm_desired * linear_x_d;
-		    u_y = norm_limit / norm_desired * linear_y_d;
-		}
-		else
-		{
-		    u_p = angular_z_d;
-		    u_x = linear_x_d;
-		    u_y = linear_y_d;
-		}
-        setVel[0] = (int)  radps_to_rpm / wheel_radius * ( u_x - u_y - l * u_p) * gear_ratio;
-        setVel[1] = (int) -radps_to_rpm / wheel_radius * ( u_x + u_y + l * u_p) * gear_ratio;
-        setVel[2] = (int)  radps_to_rpm / wheel_radius * ( u_x + u_y - l * u_p) * gear_ratio;
-        setVel[3] = (int) -radps_to_rpm / wheel_radius * ( u_x - u_y + l * u_p) * gear_ratio;
-	}
+    if (norm_desired > 0.01)
+    {
+        if (norm_desired > norm_limit)
+        {
+            u_p = norm_limit / norm_desired * angular_z_d;
+            u_x = norm_limit / norm_desired * linear_x_d;
+            u_y = norm_limit / norm_desired * linear_y_d;
+        }
+        else
+        {
+            u_p = angular_z_d;
+            u_x = linear_x_d;
+            u_y = linear_y_d;
+        }
+
+        setVel[0] = int( radps_to_rpm / wheel_radius * ( u_x - u_y - l * u_p) * gear_ratio);
+        setVel[1] = int(-radps_to_rpm / wheel_radius * ( u_x + u_y + l * u_p) * gear_ratio);
+        setVel[3] = int( radps_to_rpm / wheel_radius * ( u_x + u_y - l * u_p) * gear_ratio);
+        setVel[2] = int(-radps_to_rpm / wheel_radius * ( u_x - u_y + l * u_p) * gear_ratio);
+    }
 
     ROS_INFO("Desired velocity (rpm) = %ld, %ld, %ld, %ld", (long int)setVel[0], (long int)setVel[1], (long int)setVel[2], (long int)setVel[3]);
 
@@ -296,6 +299,55 @@ tf::Transform getTransformForMotion(double linear_vel_x, double linear_vel_y, do
     
     return tmp;
 }
+nav_msgs::Odometry computeOdometry(double linear_vel_x, double linear_vel_y, double angular_vel_z, double step_time)
+{
+    nav_msgs::Odometry odom;
+
+    tf::Transform odom_transform =
+	      odom_transform * getTransformForMotion(
+				    linear_vel_x, linear_vel_y, angular_vel_z, step_time);
+		tf::poseTFToMsg(odom_transform, odom.pose.pose);
+
+    odom.twist.twist.linear.x  = linear_vel_x;
+		odom.twist.twist.linear.y  = linear_vel_y;
+		odom.twist.twist.angular.z = angular_vel_z;
+
+		odom.header.stamp = ros::Time::now();
+		odom.header.frame_id = "odom";
+		odom.child_frame_id = "base_footprint";
+
+		odom.pose.covariance[0] = 0.001;
+		odom.pose.covariance[7] = 0.001;
+		odom.pose.covariance[14] = 1000000000000.0;
+		odom.pose.covariance[21] = 1000000000000.0;
+		odom.pose.covariance[28] = 1000000000000.0;
+		
+		if ( abs(angular_vel_z) < 0.0001 )
+    {
+	      odom.pose.covariance[35] = 0.01;
+		}
+    else
+    {
+	      odom.pose.covariance[35] = 100.0;
+		}
+
+		odom.twist.covariance[0] = 0.001;
+		odom.twist.covariance[7] = 0.001;
+		odom.twist.covariance[14] = 0.001;
+		odom.twist.covariance[21] = 1000000000000.0;
+		odom.twist.covariance[28] = 1000000000000.0;
+
+		if ( abs(angular_vel_z) < 0.0001 )
+    {
+	      odom.twist.covariance[35] = 0.01;
+		}
+    else
+    {
+	      odom.twist.covariance[35] = 100.0;
+		}
+
+    return odom;
+}
 
 int main(int argc, char **argv)
 {
@@ -306,21 +358,21 @@ int main(int argc, char **argv)
     tf::Transform odom_transform;
     odom_transform.setIdentity();
 
-	ros::Time last_odom_publish_time = ros::Time::now();
+    ros::Time last_odom_publish_time = ros::Time::now();
 
     int lResult = MMC_FAILED;
     unsigned int ulErrorCode = 0;
     SetDefaultParameters();
     PrintSettings();
 
-    if((lResult = OpenDevice(&ulErrorCode))!=MMC_SUCCESS)
+    if ((lResult = OpenDevice(&ulErrorCode))!=MMC_SUCCESS)
     {
         ROS_INFO("OpenDevice Failed");
     }
 
     for (int i=0; i< Id_length;i++)
     {
-        if((lResult = PrepareDriver(g_usNodeId[i], &ulErrorCode))!=MMC_SUCCESS)
+        if ((lResult = PrepareDriver(g_usNodeId[i], &ulErrorCode))!=MMC_SUCCESS)
         {
             ROS_INFO("PrepareDemo Failed node: %d", g_usNodeId[i]);
             return 0;
@@ -329,7 +381,7 @@ int main(int argc, char **argv)
 
     for (int i=0; i<sizeof(g_usNodeId)/sizeof(*g_usNodeId);i++)
     {
-        if(VCS_ActivateProfileVelocityMode(g_pKeyHandle, g_usNodeId[i], &ulErrorCode) == 0)
+        if (VCS_ActivateProfileVelocityMode(g_pKeyHandle, g_usNodeId[i], &ulErrorCode) == 0)
         {
             ROS_INFO("VCS_ActivateProfileVelocityMode node: %d Failed", g_usNodeId[i]);
             lResult = MMC_FAILED;
@@ -340,72 +392,35 @@ int main(int argc, char **argv)
     ROS_INFO("Ready to control velocity");
 
     ros::Subscriber sub = nh.subscribe("cmd_vel", 10, commandCallback);
-    ros::Publisher odom_pub = ph.advertise<nav_msgs::Odometry>("odom", 10);
-    ros::Rate loop_rate(30);
+    ros::Publisher odom_pub = ph.advertise<nav_msgs::Odometry>("wheel_encoder/odom", 10);
+    ros::Rate loop_rate(100);
 
     while (ros::ok())
     {
-        nav_msgs::Odometry odom;
-
         for (int i=0; i<Id_length;i++)
         {
             VCS_GetVelocityIsAveraged(g_pKeyHandle, g_usNodeId[i], &vel[i], &ulErrorCode);
         }
-		ros::Time current_time = ros::Time::now();
+        ros::Time current_time = ros::Time::now();
 
-		double wheel_speed_lf = (double)  vel[0] * rpm_to_radps / gear_ratio;
-		double wheel_speed_rf = (double) -vel[1] * rpm_to_radps / gear_ratio;
-		double wheel_speed_lb = (double)  vel[2] * rpm_to_radps / gear_ratio;
-		double wheel_speed_rb = (double) -vel[3] * rpm_to_radps / gear_ratio;
+		    double wheel_speed_lf = (double)  vel[0] * rpm_to_radps / gear_ratio;
+		    double wheel_speed_rf = (double) -vel[1] * rpm_to_radps / gear_ratio;
+		    double wheel_speed_lb = (double)  vel[3] * rpm_to_radps / gear_ratio;
+		    double wheel_speed_rb = (double) -vel[2] * rpm_to_radps / gear_ratio;
 
-		double linear_vel_x =
-			wheel_radius/4.0*(wheel_speed_lf+wheel_speed_rf+wheel_speed_lb+wheel_speed_rb);
-		double linear_vel_y =
-			wheel_radius/4.0*(-wheel_speed_lf+wheel_speed_rf+wheel_speed_lb-wheel_speed_rb);
-		double angular_vel_z =
-			wheel_radius/(4.0*l)*(-wheel_speed_lf+wheel_speed_rf-wheel_speed_lb+wheel_speed_rb);
+		    double linear_vel_x =
+            wheel_radius/4.0*(wheel_speed_lf+wheel_speed_rf+wheel_speed_lb+wheel_speed_rb);
+		    double linear_vel_y =
+            wheel_radius/4.0*(-wheel_speed_lf+wheel_speed_rf+wheel_speed_lb-wheel_speed_rb);
+		    double angular_vel_z =
+            wheel_radius/(4.0*l)*(-wheel_speed_lf+wheel_speed_rf-wheel_speed_lb+wheel_speed_rb);
 
         double step_time = current_time.toSec() - last_odom_publish_time.toSec();
-		last_odom_publish_time = current_time;
-		
-		odom_transform =
-			odom_transform * getTransformForMotion(
-				linear_vel_x, linear_vel_y, angular_vel_z, step_time);
-		tf::poseTFToMsg(odom_transform, odom.pose.pose);
+		    last_odom_publish_time = current_time;
 
-        odom.twist.twist.linear.x  = linear_vel_x;
-		odom.twist.twist.linear.y  = linear_vel_y;
-		odom.twist.twist.angular.z = angular_vel_z;
+        nav_msgs::Odometry odom_msg = computeOdometry(linear_vel_x, linear_vel_y, angular_vel_z, step_time);
 
-		odom.header.stamp = current_time;
-		odom.header.frame_id = "odom";
-		odom.child_frame_id = "base_footprint";
-		
-		odom.pose.covariance[0] = 0.001;
-		odom.pose.covariance[7] = 0.001;
-		odom.pose.covariance[14] = 1000000000000.0;
-		odom.pose.covariance[21] = 1000000000000.0;
-		odom.pose.covariance[28] = 1000000000000.0;
-		
-		if (abs(angular_vel_z) < 0.0001) {
-			odom.pose.covariance[35] = 0.01;
-		}else{
-			odom.pose.covariance[35] = 100.0;
-		}
-
-		odom.twist.covariance[0] = 0.001;
-		odom.twist.covariance[7] = 0.001;
-		odom.twist.covariance[14] = 0.001;
-		odom.twist.covariance[21] = 1000000000000.0;
-		odom.twist.covariance[28] = 1000000000000.0;
-		
-		if (abs(angular_vel_z) < 0.0001) {
-			odom.twist.covariance[35] = 0.01;
-		}else{
-			odom.twist.covariance[35] = 100.0;
-		}
-
-        odom_pub.publish(odom);
+        odom_pub.publish(odom_msg);
         
         ros::spinOnce();
 
@@ -414,12 +429,11 @@ int main(int argc, char **argv)
 
     if((lResult = CloseDevice(&ulErrorCode))!=MMC_SUCCESS)
     {
-       ROS_INFO("CloseDevice");
-       return lResult;
+        ROS_INFO("CloseDevice");
+        return lResult;
     }
 
-	return 0;
+	  return 0;
 
 }
-
 
