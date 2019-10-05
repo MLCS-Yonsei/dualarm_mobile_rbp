@@ -6,12 +6,8 @@
 #include "geometry_msgs/Twist.h"
 #include "nav_msgs/Odometry.h"
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <string.h>
-#include <sstream>
-#include <iostream>
 
 #include <net/if.h>
 #include <time.h>
@@ -19,11 +15,11 @@
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 
-#include <linux/can.h>
 #include <linux/can/raw.h>
 
-#define CANID_DELIM '#'
-#define DATA_SEPERATOR '.'
+#include <dualarm_mobile_rbp/can_utils/lib.h>
+#include <dualarm_mobile_rbp/utils.h>
+
 
 typedef void* HANDLE;
 typedef int BOOL;
@@ -83,192 +79,6 @@ double angular_z_d = 0;
 
 // Saturate velocity with l1 norm ball
 double norm_limit = 0.74;
-
-
-unsigned char asc2nibble(char c) {
-
-  if ((c >= '0') && (c <= '9'))
-    return c - '0';
-
-  if ((c >= 'A') && (c <= 'F'))
-    return c - 'A' + 10;
-
-  if ((c >= 'a') && (c <= 'f'))
-    return c - 'a' + 10;
-
-  return 16; /* error */
-}
-
-
-int hexstring2data(char *arg, unsigned char *data, int maxdlen) {
-
-  int len = strlen(arg);
-  int i;
-  unsigned char tmp;
-
-  if (!len || len%2 || len > maxdlen*2)
-    return 1;
-
-  memset(data, 0, maxdlen);
-
-  for (i=0; i < len/2; i++) {
-
-    tmp = asc2nibble(*(arg+(2*i)));
-    if (tmp > 0x0F)
-      return 1;
-
-    data[i] = (tmp << 4);
-
-    tmp = asc2nibble(*(arg+(2*i)+1));
-    if (tmp > 0x0F)
-      return 1;
-
-    data[i] |= tmp;
-  }
-
-  return 0;
-}
-
-
-int parse_canframe(char *cs, struct canfd_frame *cf)
-{
-  /* documentation see lib.h */
-
-  int i, idx, dlen, len;
-  int maxdlen = CAN_MAX_DLEN;
-  int ret = CAN_MTU;
-  unsigned char tmp;
-
-  len = strlen(cs);
-
-  memset(cf, 0, sizeof(*cf)); /* init CAN FD frame, e.g. LEN = 0 */
-
-  if (len < 4)
-    return 0;
-
-  if (cs[3] == CANID_DELIM) /* 3 digits */
-  {
-
-    idx = 4;
-    for (i=0; i<3; i++){
-      if ((tmp = asc2nibble(cs[i])) > 0x0F)
-        return 0;
-      cf->can_id |= (tmp << (2-i)*4);
-    }
-
-  }
-  else if (cs[8] == CANID_DELIM) /* 8 digits */
-  {
-
-    idx = 9;
-    for (i=0; i<8; i++){
-      if ((tmp = asc2nibble(cs[i])) > 0x0F)
-        return 0;
-      cf->can_id |= (tmp << (7-i)*4);
-    }
-    if (!(cf->can_id & CAN_ERR_FLAG)) /* 8 digits but no errorframe?  */
-      cf->can_id |= CAN_EFF_FLAG;   /* then it is an extended frame */
-
-  }
-  else
-  {
-    return 0;
-  }
-
-  if((cs[idx] == 'R') || (cs[idx] == 'r')) /* RTR frame */
-  {
-    cf->can_id |= CAN_RTR_FLAG;
-
-    /* check for optional DLC value for CAN 2.0B frames */
-    if(cs[++idx] && (tmp = asc2nibble(cs[idx])) <= CAN_MAX_DLC)
-      cf->len = tmp;
-
-    return ret;
-  }
-
-  if (cs[idx] == CANID_DELIM) /* CAN FD frame escape char '##' */
-  {
-
-    maxdlen = CANFD_MAX_DLEN;
-    ret = CANFD_MTU;
-
-    /* CAN FD frame <canid>##<flags><data>* */
-    if ((tmp = asc2nibble(cs[idx+1])) > 0x0F)
-      return 0;
-
-    cf->flags = tmp;
-    idx += 2;
-  }
-
-  for (i=0, dlen=0; i < maxdlen; i++){
-
-    if(cs[idx] == DATA_SEPERATOR) /* skip (optional) separator */
-      idx++;
-
-    if(idx >= len) /* end of string => end of data */
-      break;
-
-    if ((tmp = asc2nibble(cs[idx++])) > 0x0F)
-      return 0;
-    cf->data[i] = (tmp << 4);
-    if ((tmp = asc2nibble(cs[idx++])) > 0x0F)
-      return 0;
-    cf->data[i] |= tmp;
-    dlen++;
-  }
-  cf->len = dlen;
-
-  return ret;
-
-} // end parse_canframe(char *cs, struct canfd_frame *cf)
-
-
-void LogInfo(string message)
-{
-  cout << message << endl;
-}
-
-
-template <typename T>
-std::string dec_to_hex(T dec, int NbofByte){
-  std::stringstream stream_HL;
-  string s, s_LH;
-  stream_HL << std::setfill ('0') << std::setw(sizeof(T)*2) <<std::hex << dec;
-  s = stream_HL.str();
-  for (int i=0; i<NbofByte; i++){
-    s_LH.append(s.substr(2*(NbofByte-1-i),2));
-  }
-  return s_LH;
-}
-
-
-int hexarray_to_int(unsigned char *buffer, int length){
-  int hextoint = 0;
-  for (int i=0; i<length; i++)
-  {
-    hextoint += (buffer[i] << 8*i);
-  }
-  return hextoint;
-}
-
-
-double hexarray_to_double(unsigned char *buffer, int length){
-  int hextoint = 0;
-  for (int i=0; i<length; i++)
-  {
-    hextoint += (buffer[i] << 8*i);
-  }
-  return double(hextoint);
-}
-
-
-std::string stringappend(string a, string b)
-{
-  string s;
-  s.append(a);
-  s.append(b);
-  return s;
-}
 
 
 void commandCallback(const geometry_msgs::Twist::ConstPtr& cmd_vel)
@@ -536,8 +346,8 @@ int main(int argc, char **argv)
     {
       frame.can_id  = COB_ID_Tx[i][1] | CAN_RTR_FLAG;
       write(s, &frame, sizeof(struct can_frame));
-      nnbytes = recvmsg(s,&canmsg, 0);
-      vel[i] = hexarray_to_double(frame_get.data,4);
+      nnbytes = recvmsg(s, &canmsg, 0);
+      vel[i] = hexarray_to_double(frame_get.data, 4);
     }
 
     ros::Time current_time = ros::Time::now();
